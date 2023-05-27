@@ -98,12 +98,16 @@ class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocket
       rocketParams.clockGate.toInt << 2 |
       1 << 3 | // disableSpeculativeICacheRefill
       haveDCache.toInt << 9 | // suppressCorruptOnGrantData
-      tileParams.icache.get.prefetch.toInt << 17
+      tileParams.icache.get.prefetch.toInt << 17 |
+      1 << 18 | /* disableICache */
+      1 << 19   /* disableDCache */
     )
     Some(CustomCSR(chickenCSRId, mask, Some(mask)))
   }
 
   def disableICachePrefetch = getOrElse(chickenCSR, _.value(17), true.B)
+  def disableICache = getOrElse(chickenCSR, _.value(18), true.B)
+  def disableDCache = getOrElse(chickenCSR, _.value(19), true.B)
 
   def marchid = CustomCSR.constant(CSRs.marchid, BigInt(1))
 

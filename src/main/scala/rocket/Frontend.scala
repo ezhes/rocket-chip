@@ -96,7 +96,7 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
   icache.clock := gated_clock
   icache.io.clock_enabled := clock_en
   withClock (gated_clock) { // entering gated-clock domain
-
+  icache.io.disable_icache := io.ptw.customCSRs.asInstanceOf[RocketCustomCSRs].disableICache
   val tlb = Module(new TLB(true, log2Ceil(fetchBytes), TLBConfig(nTLBSets, nTLBWays, outer.icacheParams.nTLBBasePageSectors, outer.icacheParams.nTLBSuperpages)))
 
   val s1_valid = Reg(Bool())

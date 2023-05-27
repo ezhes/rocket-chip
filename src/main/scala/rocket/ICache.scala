@@ -238,6 +238,9 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
 
   /** I$ miss or ITIM access will still enable clock even [[ICache]] is asked to be gated. */
   val keep_clock_enabled = Output(Bool())
+
+  /** Do not serve requests from the cache. Undefined behavior to invoke while using ITIM */
+  val disable_icache = Input(Bool())
 }
 
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
@@ -350,7 +353,9 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     *
     * @todo seem CPU access are both processed by `s1_tag_hit` and `Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))`?
     */
-  val s1_hit = s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))
+  val s1_hit = (s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))) && 
+                /* Do not allow hitting into the icache if we've chickened out */
+                !io.disable_icache
   dontTouch(s1_hit)
   val s2_valid = RegNext(s1_valid && !io.s1_kill, false.B)
   val s2_hit = RegNext(s1_hit)
@@ -377,6 +382,13 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val s2_request_refill = s2_miss && RegNext(s1_can_request_refill)
   val refill_paddr = RegEnable(io.s1_paddr, s1_valid && s1_can_request_refill)
   val refill_vaddr = RegEnable(s1_vaddr, s1_valid && s1_can_request_refill)
+  /* 
+  We want to block refills issued while the cache was disabled from writing back
+  This is because we launch a refill regardless of the contents of the array,
+  which may lead us to entering the same data into multiple ways if we keep filling
+  the cache.
+  */
+  val refill_was_cache_disabled = RegEnable(io.disable_icache, s1_valid && s1_can_request_refill)
   val refill_tag = refill_paddr >> pgUntagBits
   val refill_idx = index(refill_vaddr, refill_paddr)
   /** AccessAckData, is refilling I$, it will block request from CPU. */
@@ -415,12 +427,14 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     size = nSets,
     data = Vec(nWays, UInt(tECC.width(1 + tagBits).W))
   )
-  val tag_rdata = tag_array.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid)
+  val tag_rdata = tag_array.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && !io.disable_icache)
   /** register indicates the ongoing GetAckData transaction is corrupted. */
   val accruedRefillError = Reg(Bool())
   /** wire indicates the ongoing GetAckData transaction is corrupted. */
   val refillError = tl_out.d.bits.corrupt || (refill_cnt > 0.U && accruedRefillError)
-  when (refill_done) {
+  when (refill_done && 
+        /* Don't write to the tag array if the request is from a forced miss */
+        !refill_was_cache_disabled) {
     // For AccessAckData, denied => corrupt
     /** data written to [[tag_array]].
      *  ECC encoded `refillError ## refill_tag`*/
@@ -480,9 +494,9 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     */
   val s1s3_slaveData = Reg(UInt(wordBits.W))
 
+  val s1_idx = index(s1_vaddr, io.s1_paddr)
+  val s1_tag = io.s1_paddr >> pgUntagBits
   for (i <- 0 until nWays) {
-    val s1_idx = index(s1_vaddr, io.s1_paddr)
-    val s1_tag = io.s1_paddr >> pgUntagBits
     /** this way is used by scratchpad.
       * [[tag_array]] corrupted.
       */
@@ -551,6 +565,24 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       )
   }
 
+  /*
+  To support fetches through I$ while the cache is disabled, we hold on to the 
+  last line we fetched while the I$ was disabled. In essence, this means that we
+  have a single line cache but it allows a client to request an address and keep
+  polling until they get it. A client which polls more than one address at the
+  same time will live lock the cache; however, Rocket doesn't do this so we'll
+  ignore the issue.
+  */
+  val blockBytes2 = log2Ceil(outer.icacheParams.blockBytes)
+  val last_fill_phys_tag = RegInit({
+    val v = Wire(Valid(UInt((paddrBits - blockBytes2).W)))
+    v.valid := false.B
+    v.bits := DontCare
+    v
+  })
+  val words_per_refill_cycle = tl_out.d.bits.data.getWidth / wordBits
+  val last_fill_data = Reg(Vec(refillCycles * words_per_refill_cycle, UInt(dECC.width(wordBits).W)))
+
   for ((data_array , i) <- data_arrays.zipWithIndex) {
     /**  bank match (vaddr[2]) */
     def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i.U
@@ -558,8 +590,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     /** read_enable signal*/
     val s0_ren = (s0_valid && wordMatch(s0_vaddr)) || (s0_slaveValid && wordMatch(s0_slaveAddr))
     /** write_enable signal
-     * refill from [[tl_out]] or ITIM write. */
-    val wen = (refill_one_beat && !invalidated) || (s3_slaveValid && wordMatch(s1s3_slaveAddr))
+     * refill from [[tl_out]] or ITIM write. Don't write forced misses as they may be duplicated. */
+    val wen = (refill_one_beat && !invalidated && !refill_was_cache_disabled) || (s3_slaveValid && wordMatch(s1s3_slaveAddr))
     /** index to access [[data_array]]. */
     val mem_idx =
       // I$ refill. refill_idx[2:0] is the beats
@@ -579,12 +611,29 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     }
     // write access
     /** data read from [[data_array]]. */
-    val dout = data_array.read(mem_idx, !wen && s0_ren)
+    val dout = data_array.read(mem_idx, !wen && s0_ren && !io.disable_icache)
     // Mux to select a way to [[s1_dout]]
     when (wordMatch(Mux(s1_slaveValid, s1s3_slaveAddr, io.s1_paddr))) {
       s1_dout := dout
     }
   }
+
+  when (!io.disable_icache) {
+    last_fill_phys_tag.valid := false.B
+  } .elsewhen (refill_one_beat && !invalidate && io.disable_icache && refill_was_cache_disabled) {
+    for (i <- 0 until words_per_refill_cycle) {
+      last_fill_data((refill_cnt << log2Ceil(words_per_refill_cycle)) | i.U) := dECC.encode(tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i))
+      // last_fill_data(Cat(refill_cnt, i.U(log2Ceil(words_per_refill_cycle).W))) := dECC.encode(tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i))
+    }
+
+    last_fill_phys_tag.bits := refill_paddr >> blockBytes2
+    last_fill_phys_tag.valid := refill_done /* Keep the fill line invalid until we're done filling */
+  } 
+
+  def last_fill_data_idx(addr:UInt) = addr(blockOffBits - 1, blockOffBits-log2Ceil(refillCycles)-log2Ceil(words_per_refill_cycle))
+  val s1_last_fill_hit = io.disable_icache && last_fill_phys_tag.valid && 
+                      io.s1_paddr >> blockBytes2 === last_fill_phys_tag.bits
+  val s1_beat = last_fill_data_idx(s1_vaddr)
 
   /** When writing full words to ITIM, ECC errors are correctable.
     * When writing a full scratchpad word, suppress the read so Xs don't leak out
@@ -594,6 +643,10 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   /** clock gate signal for [[s2_tag_hit]], [[s2_dout]], [[s2_tag_disparity]], [[s2_tl_error]], [[s2_scratchpad_hit]]. */
   val s1_clk_en = s1_valid || s1_slaveValid
+  val s2_paddr = RegEnable(io.s1_paddr, s1_clk_en && io.disable_icache)
+  val s2_beat = last_fill_data_idx(io.s2_vaddr)
+  val s2_last_fill_hit = io.disable_icache && last_fill_phys_tag.valid && 
+                          s2_paddr >> blockBytes2 === last_fill_phys_tag.bits
   val s2_tag_hit = RegEnable(Mux(s1_dont_read, 0.U.asTypeOf(s1_tag_hit), s1_tag_hit), s1_clk_en)
   /** way index to access [[data_arrays]]. */
   val s2_hit_way = OHToUInt(s2_tag_hit)
@@ -602,7 +655,10 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     */
   val s2_scratchpad_word_addr = Cat(s2_hit_way, Mux(s2_slaveValid, s1s3_slaveAddr, io.s2_vaddr)(untagBits-1, log2Ceil(wordBits/8)), 0.U(log2Ceil(wordBits/8).W))
   val s2_dout = RegEnable(s1_dout, s1_clk_en)
-  val s2_way_mux = Mux1H(s2_tag_hit, s2_dout)
+  val s2_way_mux = Mux(s2_last_fill_hit, 
+                       last_fill_data(s2_beat), 
+                       Mux1H(s2_tag_hit, s2_dout))
+
   val s2_tag_disparity = RegEnable(s1_tag_disparity, s1_clk_en).asUInt.orR
   val s2_tl_error = RegEnable(s1_tl_error.asUInt.orR, s1_clk_en)
   /** ECC decode result for [[data_arrays]]. */
@@ -625,6 +681,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   /** ECC uncorrectable address, send to Bus Error Unit. */
   val s2_error_addr = scratchpadBase.map(base => Mux(s2_scratchpad_hit, base + s2_scratchpad_word_addr, 0.U)).getOrElse(0.U)
 
+  
   // output signals
   outer.icacheParams.latency match {
     // if I$ latency is 1, no ITIM, no ECC.
@@ -633,9 +690,11 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       require(dECC.isInstanceOf[IdentityCode])
       require(outer.icacheParams.itimAddr.isEmpty)
       // reply data to CPU at stage 2. no replay.
-      io.resp.bits.data := Mux1H(s1_tag_hit, s1_dout)
+      io.resp.bits.data := Mux(s1_last_fill_hit, 
+                               last_fill_data(s1_beat),
+                               Mux1H(s1_tag_hit, s1_dout))
       io.resp.bits.ae := s1_tl_error.asUInt.orR
-      io.resp.valid := s1_valid && s1_hit
+      io.resp.valid := s1_valid && (s1_hit || s1_last_fill_hit)
 
     // if I$ latency is 2, can have ITIM and ECC.
     case 2 =>
@@ -647,8 +706,11 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       io.resp.bits.data := s2_data_decoded.uncorrected
       io.resp.bits.ae := s2_tl_error
       io.resp.bits.replay := s2_disparity
-      io.resp.valid := s2_valid && s2_hit
+      io.resp.valid := s2_valid && (s2_hit || s2_last_fill_hit)
 
+      when (s2_valid) {
+        // printf("[icache] vaddr=%x, tag=%x, last_fill_data_idx=%x, last_fill_hit=%d, data=%x\n", io.s2_vaddr, s2_paddr >> blockBytes2, s2_beat, s2_last_fill_hit, s2_data_decoded.uncorrected)
+      }
       // report correctable error to BEU at stage 2.
       io.errors.correctable.foreach { c =>
         c.valid := (s2_valid || s2_slaveValid) && s2_disparity && !s2_report_uncorrectable_error

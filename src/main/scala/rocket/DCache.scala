@@ -112,6 +112,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
 
   val tlb = Module(new TLB(false, log2Ceil(coreDataBytes), TLBConfig(nTLBSets, nTLBWays, cacheParams.nTLBBasePageSectors, cacheParams.nTLBSuperpages)))
   val pma_checker = Module(new TLB(false, log2Ceil(coreDataBytes), TLBConfig(nTLBSets, nTLBWays, cacheParams.nTLBBasePageSectors, cacheParams.nTLBSuperpages)) with InlineInstance)
+  val disableDCache = tlb.io.ptw.customCSRs.asInstanceOf[RocketCustomCSRs].disableDCache
 
   // tags
   val replacer = ReplacementPolicy.fromString(cacheParams.replacementPolicy, nWays)
@@ -169,6 +170,13 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
   val s0_req = WireInit(io.cpu.req.bits)
   s0_req.addr := Cat(metaArb.io.out.bits.addr >> blockOffBits, io.cpu.req.bits.addr(blockOffBits-1,0))
   s0_req.idx.foreach(_ := Cat(metaArb.io.out.bits.idx, s0_req.addr(blockOffBits-1, 0)))
+  when (disableDCache) {
+    /* 
+    If the cache is disabled, force all requests to be no-alloc to prevent
+    inserting any new data into the cache
+    */
+    s0_req.no_alloc := true.B
+  }
   when (!metaArb.io.in(7).ready) { s0_req.phys := true.B }
   val s1_req = RegEnable(s0_req, s0_clk_en)
   val s1_vaddr = Cat(s1_req.idx.getOrElse(s1_req.addr) >> tagLSB, s1_req.addr(tagLSB-1, 0))
@@ -291,9 +299,14 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
       val s1_meta = tag_array.read(metaIdx, metaReq.valid && !metaReq.bits.write)
       val s1_meta_uncorrected = s1_meta.map(tECC.decode(_).uncorrected.asTypeOf(new L1Metadata))
       val s1_tag = s1_paddr >> tagLSB
-      val s1_meta_hit_way = s1_meta_uncorrected.map(r => r.coh.isValid() && r.tag === s1_tag).asUInt
+
+      val s1_meta_hit_way = s1_meta_uncorrected.map(r => 
+        r.coh.isValid() && r.tag === s1_tag && 
+        /* Inhibit hits when the cache is disabled */
+        !disableDCache
+      ).asUInt
       val s1_meta_hit_state = (
-        s1_meta_uncorrected.map(r => Mux(r.tag === s1_tag && !s1_flush_valid, r.coh.asUInt, 0.U))
+        s1_meta_uncorrected.map(r => Mux(r.tag === s1_tag && !s1_flush_valid && !disableDCache, r.coh.asUInt, 0.U))
         .reduce (_|_)).asTypeOf(chiselTypeOf(ClientMetadata.onReset))
       (s1_meta_hit_way, s1_meta_hit_state, s1_meta)
     }
@@ -409,6 +422,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
   val s2_victim_or_hit_way = Mux(s2_hit_valid, s2_hit_way, s2_victim_way)
   val s2_victim_tag = Mux(s2_valid_data_error || s2_valid_flush_line, s2_req.addr(paddrBits-1, tagLSB), Mux1H(s2_victim_way, s2_meta_corrected).tag)
   val s2_victim_state = Mux(s2_hit_valid, s2_hit_state, Mux1H(s2_victim_way, s2_meta_corrected).coh)
+  assert(!s2_valid || !disableDCache || !s2_valid_hit || usingDataScratchpad.B, "Hit while dcache is disabled?")
 
   val (s2_prb_ack_data, s2_report_param, probeNewCoh)= s2_probe_state.onProbe(probe_bits.param)
   val (s2_victim_dirty, s2_shrink_param, voluntaryNewCoh) = s2_victim_state.onCacheControl(M_FLUSH)
@@ -601,6 +615,10 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
     // Following are always tied off
     x.fetch       := false.B
     x.secure      := true.B
+  }
+
+  when (tl_out_a.valid) {
+    printf("[dcache] tl_out_a %x, read=%d, write=%d, cmd=%d\n", tl_out_a.bits.address, s2_read, s2_write, s2_req.cmd)
   }
 
   // Set pending bits for outstanding TileLink transaction
