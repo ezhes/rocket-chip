@@ -734,3 +734,46 @@ class RoCCDecode(aluFn: ALUFN = ALUFN())(implicit val p: Parameters) extends Dec
     CUSTOM3_RD_RS1->    List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
     CUSTOM3_RD_RS1_RS2->List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N))
 }
+
+
+class RoCCDecodeNoCustom3(aluFn: ALUFN = ALUFN())(implicit val p: Parameters) extends DecodeConstants
+{
+  val table: Array[(BitPat, List[BitPat])] = Array(
+    CUSTOM0->           List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM0_RS1->       List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM0_RS1_RS2->   List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM0_RD->        List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM0_RD_RS1->    List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM0_RD_RS1_RS2->List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM1->           List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM1_RS1->       List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM1_RS1_RS2->   List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM1_RD->        List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM1_RD_RS1->    List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM1_RD_RS1_RS2->List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM2->           List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM2_RS1->       List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM2_RS1_RS2->   List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    CUSTOM2_RD->        List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM2_RD_RS1->    List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    CUSTOM2_RD_RS1_RS2->List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,N,N,N,N,N,N,Y,CSR.N,N,N,N,N)
+  )
+}
+
+class MTEDecode(aluFn: ALUFN = ALUFN())(implicit val p: Parameters) extends DecodeConstants {
+  val table: Array[(BitPat, List[BitPat])] = Array(
+                                        //           jal                                                                         renf1               fence.i
+                                        //   val     | jalr                                                                      | renf2             |
+                                        //   | fp_val| | renx2                                                                   | | renf3           |
+                                        //   | | rocc| | | renx1               s_alu1                              mem_val       | | | wfd           |
+                                        //   | | | br| | | | scie      s_alu2  |       imm    dw     alu           | mem_cmd     | | | | mul         |
+                                        //   | | | | | | | | | zbk     |       |       |      |      |             | |           | | | | | div       | fence
+                                        //   | | | | | | | | | | zkn   |       |       |      |      |             | |           | | | | | | wxd     | | amo
+                                        //   | | | | | | | | | | | zks |       |       |      |      |             | |           | | | | | | |       | | | dp
+    MTEInstructions.MTE_ADD->           List(Y,N,N,N,N,N,Y,Y,N,N,N,N,A2_RS2, A1_PTR, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    
+    // MTE_IRT->           List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    // MTE_STTI->          List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    // MTE_ADDTI->         List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+  )
+}

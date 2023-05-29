@@ -278,7 +278,9 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     (if (fLen >= 32)    new FDecode(aluFn) +: (xLen > 32).option(new F64Decode(aluFn)).toSeq else Nil) ++:
     (if (fLen >= 64)    new DDecode(aluFn) +: (xLen > 32).option(new D64Decode(aluFn)).toSeq else Nil) ++:
     (if (minFLen == 16) new HDecode(aluFn) +: (xLen > 32).option(new H64Decode(aluFn)).toSeq ++: (fLen >= 64).option(new HDDecode(aluFn)).toSeq else Nil) ++:
-    (usingRoCC.option(new RoCCDecode(aluFn))) ++:
+    ((usingRoCC && !usingMTE).option(new RoCCDecode(aluFn))) ++:
+    ((usingRoCC &&  usingMTE).option(new RoCCDecodeNoCustom3(aluFn))) ++:
+    (usingMTE.option(new MTEDecode(aluFn))) ++:
     (rocketParams.useSCIE.option(new SCIEDecode(aluFn))) ++:
     (if (usingBitManip) new ZBADecode +: (xLen == 64).option(new ZBA64Decode).toSeq ++: new ZBBMDecode +: new ZBBORCBDecode +: new ZBCRDecode +: new ZBSDecode +: (xLen == 32).option(new ZBS32Decode).toSeq ++: (xLen == 64).option(new ZBS64Decode).toSeq ++: new ZBBSEDecode +: new ZBBCDecode +: (xLen == 64).option(new ZBBC64Decode).toSeq else Nil) ++:
     (if (usingBitManip && !usingBitManipCrypto) (xLen == 32).option(new ZBBZE32Decode).toSeq ++: (xLen == 64).option(new ZBBZE64Decode).toSeq else Nil) ++:
@@ -502,6 +504,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_imm = ImmGen(ex_ctrl.sel_imm, ex_reg_inst)
   val ex_op1 = MuxLookup(ex_ctrl.sel_alu1, 0.S, Seq(
     A1_RS1 -> ex_rs(0).asSInt,
+    A1_PTR -> ex_rs(0).asSInt,
     A1_PC -> ex_reg_pc.asSInt))
   val ex_op2 = MuxLookup(ex_ctrl.sel_alu2, 0.S, Seq(
     A2_RS2 -> ex_rs(1).asSInt,
@@ -712,6 +715,18 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     mem_reg_mem_size := ex_reg_mem_size
     mem_reg_hls_or_dv := io.dmem.req.bits.dv
     mem_reg_pc := ex_reg_pc
+    val mte_alu = {
+      if (usingMTE) {
+        Cat(
+          Mux(ex_ctrl.sel_alu1 === A1_PTR, ex_rs(0)(xLen - 1 , xLen - MTEConfig.tagBits),
+                                          alu.io.out(xLen - 1 , xLen - MTEConfig.tagBits)),
+          alu.io.out( xLen - MTEConfig.tagBits - 1, 0)
+        )
+      } else {
+        alu.io.out
+      }
+    }
+
     // IDecode ensured they are 1H
     mem_reg_wdata := Mux1H(Seq(
       ex_scie_unpipelined -> ex_scie_unpipelined_wdata,
@@ -719,7 +734,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
       ex_ctrl.zkn         -> ex_zkn_wdata,
       ex_ctrl.zks         -> ex_zks_wdata,
       (!ex_scie_unpipelined && !ex_ctrl.zbk && !ex_ctrl.zkn && !ex_ctrl.zks)
-                          -> alu.io.out,
+                          -> mte_alu,
     ))
     mem_br_taken := alu.io.cmp_out
 
