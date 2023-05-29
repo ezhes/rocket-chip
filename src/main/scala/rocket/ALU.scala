@@ -19,6 +19,7 @@ class ALUFN {
   def FN_SR   = 5.U
   def FN_OR   = 6.U
   def FN_AND  = 7.U
+  def FN_IRT  = 8.U
   def FN_SUB  = 10.U
   def FN_SRA  = 11.U
   def FN_SLT  = 12.U

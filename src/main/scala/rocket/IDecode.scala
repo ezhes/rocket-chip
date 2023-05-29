@@ -771,8 +771,7 @@ class MTEDecode(aluFn: ALUFN = ALUFN())(implicit val p: Parameters) extends Deco
                                         //   | | | | | | | | | | zkn   |       |       |      |      |             | |           | | | | | | wxd     | | amo
                                         //   | | | | | | | | | | | zks |       |       |      |      |             | |           | | | | | | |       | | | dp
     MTEInstructions.MTE_ADD->           List(Y,N,N,N,N,N,Y,Y,N,N,N,N,A2_RS2, A1_PTR, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
-    
-    // MTE_IRT->           List(Y,N,Y,N,N,N,N,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    MTEInstructions.MTE_IRT->           List(Y,N,N,N,N,N,Y,Y,N,N,N,N,A2_RS2, A1_RS1, IMM_X, DW_XPR,aluFn.FN_IRT,   N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
     // MTE_STTI->          List(Y,N,Y,N,N,N,Y,Y,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N),
     // MTE_ADDTI->         List(Y,N,Y,N,N,N,N,N,N,N,N,N,A2_ZERO,A1_RS1, IMM_X, DW_XPR,aluFn.FN_ADD,   N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
   )

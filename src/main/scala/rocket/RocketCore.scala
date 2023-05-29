@@ -717,9 +717,34 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     mem_reg_pc := ex_reg_pc
     val mte_alu = {
       if (usingMTE) {
+        val is_irt = ex_ctrl.alu_fn === ALUFN().FN_IRT
+        val dprv = csr.io.status.dprv
+        val lfsrs = Wire(Vec(4, UInt(4.W)))
+        for (i <- 0 until 4) {
+          val lfsr = random.GaloisLFSR.maxPeriod(
+            width = 16,
+            /* 
+            By isolating LFSRs by prv and advancing them at different hard to predict
+            rates, we're able to make breaking the LFSR difficult. 
+            Isolation helps on time sharing systems since a process can't typically
+            know the exact breakdown of time spent in S and U mode of the target, let
+            alone the exact composition of the ALU operations and concurrent
+            mispredictions (at least not easily). This is not a great source but it's
+            very cheap.
+            */
+            increment = dprv === i.U || (
+              mem_wrong_npc ^
+              ex_ctrl.alu_fn(i)
+            ),
+            seed = Some(i + 1)
+          )
+          lfsrs(i) := lfsr
+        }
+        
         Cat(
+          Mux(is_irt,                      lfsrs(dprv)(MTEConfig.tagBits - 1, 0),
           Mux(ex_ctrl.sel_alu1 === A1_PTR, ex_rs(0)(xLen - 1 , xLen - MTEConfig.tagBits),
-                                          alu.io.out(xLen - 1 , xLen - MTEConfig.tagBits)),
+                                           alu.io.out(xLen - 1 , xLen - MTEConfig.tagBits))),
           alu.io.out( xLen - MTEConfig.tagBits - 1, 0)
         )
       } else {
