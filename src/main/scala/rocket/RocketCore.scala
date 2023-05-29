@@ -31,6 +31,8 @@ case class RocketCoreParams(
   useCryptoSM: Boolean = false,
   nLocalInterrupts: Int = 0,
   useNMI: Boolean = false,
+  useMTE: Boolean = false,
+  mteRegions:List[MTERegion] = List(),
   nBreakpoints: Int = 1,
   useBPWatch: Boolean = false,
   mcontextWidth: Int = 0,
@@ -80,6 +82,8 @@ trait HasRocketCoreParameters extends HasCoreParameters {
   val usingABLU = usingBitManip || usingBitManipCrypto
   val aluFn = if (usingABLU) new ABLUFN else new ALUFN
 
+  val usingMTE = rocketParams.useMTE
+
   require(!fastLoadByte || fastLoadWord)
   require(!rocketParams.haveFSDirty, "rocket doesn't support setting fs dirty from outside, please disable haveFSDirty")
 }
@@ -99,8 +103,8 @@ class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocket
       1 << 3 | // disableSpeculativeICacheRefill
       haveDCache.toInt << 9 | // suppressCorruptOnGrantData
       tileParams.icache.get.prefetch.toInt << 17 |
-      1 << 18 | /* disableICache */
-      1 << 19   /* disableDCache */
+      0 << 18 | /* disableICache */
+      0 << 19   /* disableDCache */
     )
     Some(CustomCSR(chickenCSRId, mask, Some(mask)))
   }
@@ -116,7 +120,92 @@ class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocket
   // mimpid encodes a release version in the form of a BCD-encoded datestamp.
   def mimpid = CustomCSR.constant(CSRs.mimpid, BigInt(rocketParams.mimpid))
 
-  override def decls = super.decls :+ marchid :+ mvendorid :+ mimpid
+  /* xLen 1s, suitable for masking max size VAs */
+  private val xLenMask = (BigInt(1) << xLen) - 1
+  private val physicalAddressMask = (BigInt(1) << coreMaxAddrBits) - 1
+  private def mteCSRGen(id: Int, mask: BigInt, init: BigInt, hasWritePort:Boolean = false): Option[CustomCSR] = {
+    /* Don't generate MTE CSRs if we don't have MTE enabled for this core */
+    if (usingMTE) {
+      Some({CustomCSR(id, mask, Some(init), hasWritePort)})
+    } else {
+      None
+    }
+  }
+
+  def smte_configCSR: Option[CustomCSR] = {
+    val mask = {
+      MTECSRs.widthToMask(MTECSRs.smte_config_enableWidth) << MTECSRs.smte_config_enableShift |
+      //TODO: We don't currently support sync and we don't plan to. RAZ/WI
+      // MTECSRs.smte_config_enforceSyncMask << MTECSRs.smte_config_enforceSyncShift |
+      MTECSRs.widthToMask(MTECSRs.smte_config_permissiveTagWidth) << MTECSRs.smte_config_permissiveTagShift
+    }
+
+    val init = BigInt(
+      0 << MTECSRs.smte_config_enableShift |
+      0 << MTECSRs.smte_config_enforceSyncShift |
+      0 << MTECSRs.smte_config_permissiveTagShift
+    )
+    mteCSRGen(MTECSRs.smte_configID, mask, init)
+  }
+
+  def smte_faCSR : Option[CustomCSR] = 
+    mteCSRGen(MTECSRs.smte_faID, xLenMask, 0, true)
+  
+  def smte_fstatusCSR : Option[CustomCSR] = 
+    mteCSRGen(MTECSRs.smte_fstatusID, xLenMask, 0, true)
+
+  def smte_tagbaseCSRs : Seq[CustomCSR] = MTECSRs.smte_tagbaseIDs(rocketParams.mteRegions).flatMap {
+    csr_id =>
+    mteCSRGen(csr_id, physicalAddressMask, 0)
+  }
+
+  def smte_tagmaskCSRs : Seq[CustomCSR] = MTECSRs.smte_tagmaskIDs(rocketParams.mteRegions).flatMap {
+    csr_id =>
+    mteCSRGen(csr_id, physicalAddressMask, 0)
+  }
+
+  def mteEnabled = getOrElse(
+    smte_configCSR, 
+    _.value(MTECSRs.smte_config_enableShift + MTECSRs.smte_config_enableWidth - 1, MTECSRs.smte_config_enableShift), 
+    0.U
+  )
+
+  def mteFStatusValid = getOrElse(
+    smte_fstatusCSR,
+    _.value(MTECSRs.smte_fstatus_validShift),
+    false.B
+  )
+
+  def mtePermissiveTag = getOrElse(
+    smte_configCSR,
+    _.value(MTECSRs.smte_config_permissiveTagShift + MTECSRs.smte_config_permissiveTagWidth - 1, MTECSRs.smte_config_permissiveTagShift),
+    DontCare
+  )
+
+  def smte_tagbases = smte_tagbaseCSRs.map { csr =>
+    getOrElse(Some(csr), _.value(coreMaxAddrBits - 1, 0), DontCare)
+  }
+
+  def smte_tagmasks = smte_tagmaskCSRs.map { csr =>
+    getOrElse(Some(csr), _.value(coreMaxAddrBits - 1, 0), DontCare)
+  }
+
+  // Returns the writable IO port for a CustomCSR definition if that CSR is both
+  // enabled and writable in this configuration 
+  def getWritableOpt(csr:Option[CustomCSR]): Option[CustomCSRIOWritable] = {
+    csr match {
+      case Some(csr) => 
+        (decls zip csrs).find {case (c_def, c_io) => c_def.id == csr.id } match {
+          case Some((decls, c_io_writable : CustomCSRIOWritable)) => 
+            Some(c_io_writable)
+          case _ => None
+        }
+      case None => None
+    }
+  }
+  override def decls = super.decls ++ Some(marchid) ++ Some(mvendorid) ++ Some(mimpid) ++ 
+    smte_configCSR ++ smte_faCSR ++ 
+    smte_fstatusCSR ++ smte_tagbaseCSRs ++ smte_tagmaskCSRs
 }
 
 class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
@@ -803,7 +892,21 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   io.ptw.ptbr := csr.io.ptbr
   io.ptw.hgatp := csr.io.hgatp
   io.ptw.vsatp := csr.io.vsatp
-  (io.ptw.customCSRs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs := rhs }
+  val custom_csrs = Wire(new RocketCustomCSRs)
+  (custom_csrs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs <> rhs }
+  // (io.ptw.customCSRs.csrs zip custom_csrs.csrs).map {case (lhs, rhs) => lhs <> rhs}
+
+  io.imem.bpmStatic := custom_csrs.bpmStatic
+  io.imem.disableICachePrefetch := custom_csrs.disableICachePrefetch
+  io.imem.disableSpeculativeICacheRefill := custom_csrs.disableSpeculativeICacheRefill
+  io.imem.disableICache := custom_csrs.disableICache
+  io.imem.flushBTB := custom_csrs.flushBTB
+
+  
+  io.ptw.disableDCacheClockGate := custom_csrs.disableDCacheClockGate
+  io.ptw.disableDCache := custom_csrs.disableDCache
+  io.ptw.suppressCorruptOnGrantData := custom_csrs.suppressCorruptOnGrantData
+
   io.ptw.status := csr.io.status
   io.ptw.hstatus := csr.io.hstatus
   io.ptw.gstatus := csr.io.gstatus
@@ -897,7 +1000,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
                                 mem_npc))    // flush or branch misprediction
   io.imem.flush_icache := wb_reg_valid && wb_ctrl.fence_i && !io.dmem.s2_nack
   io.imem.might_request := {
-    imem_might_request_reg := ex_pc_valid || mem_pc_valid || io.ptw.customCSRs.disableICacheClockGate
+    imem_might_request_reg := ex_pc_valid || mem_pc_valid || custom_csrs.disableICacheClockGate
     imem_might_request_reg
   }
   io.imem.progress := RegNext(wb_reg_valid && !replay_wb_common)
@@ -940,7 +1043,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   io.fpu.dmem_resp_data := (if (minFLen == 32) io.dmem.resp.bits.data_word_bypass else io.dmem.resp.bits.data)
   io.fpu.dmem_resp_type := io.dmem.resp.bits.size
   io.fpu.dmem_resp_tag := dmem_resp_waddr
-  io.fpu.keep_clock_enabled := io.ptw.customCSRs.disableCoreClockGate
+  io.fpu.keep_clock_enabled := custom_csrs.disableCoreClockGate
 
   io.dmem.req.valid     := ex_reg_valid && ex_ctrl.mem
   val ex_dcache_tag = Cat(ex_waddr, ex_ctrl.fp)
@@ -977,7 +1080,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     clock_en := clock_en_reg || ex_pc_valid || (!long_latency_stall && io.imem.resp.valid)
     clock_en_reg :=
       ex_pc_valid || mem_pc_valid || wb_pc_valid || // instruction in flight
-      io.ptw.customCSRs.disableCoreClockGate || // chicken bit
+      custom_csrs.disableCoreClockGate || // chicken bit
       !div.io.req.ready || // mul/div in flight
       usingFPU.B && !io.fpu.fcsr_rdy || // long-latency FPU in flight
       io.dmem.replay_next || // long-latency load replaying
@@ -1078,6 +1181,19 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     docstring = "Kill the emulation after INT rdtime cycles. Off if 0."
   )(csr.io.time)
 
+
+  /* Memory Tagging Extension */
+  if (usingMTE) {
+    val faCSR = custom_csrs.getWritableOpt(custom_csrs.smte_faCSR).get
+    val fstatusCSR = custom_csrs.getWritableOpt(custom_csrs.smte_fstatusCSR).get
+
+    faCSR.wport_wen := false.B
+    faCSR.wport_wdata := DontCare
+
+    fstatusCSR.wport_wen := false.B
+    fstatusCSR.wport_wdata := DontCare
+  }
+
   } // leaving gated-clock domain
   val rocketImpl = withClock (gated_clock) { new RocketImpl }
 
@@ -1162,3 +1278,9 @@ object ImmGen {
     Cat(sign, b30_20, b19_12, b11, b10_5, b4_1, b0).asSInt
   }
 }
+
+/// Defines a memory device/region which supports Memory Tagging
+case class MTERegion(
+  base:BigInt,
+  size:BigInt
+)

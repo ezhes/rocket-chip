@@ -619,3 +619,13 @@ class WithCloneRocketTiles(n: Int = 1, cloneHart: Int = 0, overrideIdOffset: Opt
   }
 })
 
+class WithMTE(mteRegions:List[MTERegion]) extends Config((site, here, up) => {
+  case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site) map {
+    case tp: RocketTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(
+      core = tp.tileParams.core.copy(
+        useMTE = true,
+        mteRegions = mteRegions
+      )))
+    case t => t
+  }
+})

@@ -112,7 +112,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
 
   val tlb = Module(new TLB(false, log2Ceil(coreDataBytes), TLBConfig(nTLBSets, nTLBWays, cacheParams.nTLBBasePageSectors, cacheParams.nTLBSuperpages)))
   val pma_checker = Module(new TLB(false, log2Ceil(coreDataBytes), TLBConfig(nTLBSets, nTLBWays, cacheParams.nTLBBasePageSectors, cacheParams.nTLBSuperpages)) with InlineInstance)
-  val disableDCache = tlb.io.ptw.customCSRs.asInstanceOf[RocketCustomCSRs].disableDCache
+  val disableDCache = io.ptw.disableDCache
 
   // tags
   val replacer = ReplacementPolicy.fromString(cacheParams.replacementPolicy, nWays)
@@ -655,7 +655,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
       (whole_opc, whole_opc.isOneOf(uncachedGrantOpcodes), whole_opc.isOneOf(uncachedGrantOpcodesWithData))
     }
   }
-  tl_d_data_encoded := encodeData(tl_out.d.bits.data, tl_out.d.bits.corrupt && !io.ptw.customCSRs.suppressCorruptOnGrantData && !grantIsUncached)
+  tl_d_data_encoded := encodeData(tl_out.d.bits.data, tl_out.d.bits.corrupt && !io.ptw.suppressCorruptOnGrantData && !grantIsUncached)
   val grantIsCached = d_opc.isOneOf(Grant, GrantData)
   val grantIsVoluntary = d_opc === ReleaseAck // Clears a different pending bit
   val grantIsRefill = d_opc === GrantData     // Writes the data array
@@ -1052,7 +1052,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
 
   // gate the clock
   clock_en_reg := !cacheParams.clockGate.B ||
-    io.ptw.customCSRs.disableDCacheClockGate ||
+    io.ptw.disableDCacheClockGate ||
     io.cpu.keep_clock_enabled ||
     metaArb.io.out.valid || // subsumes resetting || flushing
     s1_probe || s2_probe ||

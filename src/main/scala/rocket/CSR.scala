@@ -4,7 +4,7 @@
 package freechips.rocketchip.rocket
 
 import chisel3._
-import chisel3.util.{BitPat, Cat, Fill, Mux1H, PopCount, PriorityMux, RegEnable, UIntToOH, Valid, log2Ceil, log2Up}
+import chisel3.util.{BitPat, Cat, Fill, Mux1H, PopCount, PriorityMux, RegEnable, UIntToOH, Valid, log2Ceil, log2Up, MixedVec}
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.devices.debug.DebugModuleKey
 import freechips.rocketchip.tile._
@@ -360,9 +360,15 @@ class CSRFile(
   customCSRs: Seq[CustomCSR] = Nil)(implicit p: Parameters)
     extends CoreModule()(p)
     with HasCoreParameters {
-  val io = IO(new CSRFileIO {
-    val customCSRs = Output(Vec(CSRFile.this.customCSRs.size, new CustomCSRIO))
-  })
+   val io = new CSRFileIO {
+     val customCSRs = MixedVec(CSRFile.this.customCSRs.map( csr =>
+       if (csr.hasWritePort) {
+         new CustomCSRIOWritable
+       } else {
+         new CustomCSRIO
+       }
+     ))
+   }
 
   val reset_mstatus = WireDefault(0.U.asTypeOf(new MStatus()))
   reset_mstatus.mpp := PRV.M.U
@@ -1568,4 +1574,24 @@ class CSRFile(
   def isaStringToMask(s: String) = s.map(x => 1 << (x - 'A')).foldLeft(0)(_|_)
   def formFS(fs: UInt) = if (coreParams.haveFSDirty) fs else Fill(2, fs.orR)
   def formVS(vs: UInt) = if (usingVector) vs else 0.U
+
+  /* 
+  Additional custom wports for CSRs 
+  We put this last to override any internal writes
+  */
+  for ((io, csr, reg) <- (io.customCSRs, customCSRs, reg_custom).zipped) {
+    val mask = csr.mask.U(xLen.W)
+    val masked_internal_wdata = (wdata & mask) | (reg & ~mask)
+
+    io match {
+      case io_writable : CustomCSRIOWritable => {
+        when (io_writable.wport_wen) {
+          reg := io_writable.wport_wdata
+        }
+      }
+
+      case _ => {
+      }
+    }
+  }
 }
