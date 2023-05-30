@@ -179,7 +179,7 @@ class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocket
   def mtePermissiveTag = getOrElse(
     smte_configCSR,
     _.value(MTECSRs.smte_config_permissiveTagShift + MTECSRs.smte_config_permissiveTagWidth - 1, MTECSRs.smte_config_permissiveTagShift),
-    DontCare
+    0.U(MTEConfig.tagBits.W)
   )
 
   def smte_tagbases = smte_tagbaseCSRs.map { csr =>
@@ -301,6 +301,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     coreParams.haveCFlush.option(new CFlushDecode(tile.dcache.canSupportCFlushLine, aluFn)) ++:
     Seq(new IDecode(aluFn))
   } flatMap(_.table)
+  val custom_csrs = Wire(new RocketCustomCSRs)
 
   val ex_ctrl = Reg(new IntCtrlSigs(aluFn))
   val mem_ctrl = Reg(new IntCtrlSigs(aluFn))
@@ -501,7 +502,16 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val ex_reg_rs_msb = Reg(Vec(id_raddr.size, UInt()))
   val ex_rs = for (i <- 0 until id_raddr.size)
     yield Mux(ex_reg_rs_bypass(i), bypass_mux(ex_reg_rs_lsb(i)), Cat(ex_reg_rs_msb(i), ex_reg_rs_lsb(i)))
-  val ex_imm = ImmGen(ex_ctrl.sel_imm, ex_reg_inst)
+  val raw_imm = ImmGen(ex_ctrl.sel_imm, ex_reg_inst)
+  val ex_imm = {
+    if (usingMTE) {
+      Mux(ex_ctrl.alu_fn === ALUFN().FN_ADDTI,
+          raw_imm(raw_imm.getWidth - 1, MTEConfig.tagBits).sextTo(xLen).asSInt,
+          raw_imm)
+    } else {
+      raw_imm
+    }
+  }
   val ex_op1 = MuxLookup(ex_ctrl.sel_alu1, 0.S, Seq(
     A1_RS1 -> ex_rs(0).asSInt,
     A1_PTR -> ex_rs(0).asSInt,
@@ -516,7 +526,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     case _: ALUFN => new ALU
   })
   alu.io.dw := ex_ctrl.alu_dw
-  alu.io.fn := ex_ctrl.alu_fn
+  alu.io.fn := Mux(ex_ctrl.alu_fn === ALUFN().FN_ADDTI, ALUFN().FN_ADD, ex_ctrl.alu_fn)
   alu.io.in2 := ex_op2.asUInt
   alu.io.in1 := ex_op1.asUInt
 
@@ -717,7 +727,6 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     mem_reg_pc := ex_reg_pc
     val mte_alu = {
       if (usingMTE) {
-        val is_irt = ex_ctrl.alu_fn === ALUFN().FN_IRT
         val dprv = csr.io.status.dprv
         val lfsrs = Wire(Vec(4, UInt(4.W)))
         for (i <- 0 until 4) {
@@ -741,12 +750,26 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
           lfsrs(i) := lfsr
         }
         
-        Cat(
-          Mux(is_irt,                      lfsrs(dprv)(MTEConfig.tagBits - 1, 0),
-          Mux(ex_ctrl.sel_alu1 === A1_PTR, ex_rs(0)(xLen - 1 , xLen - MTEConfig.tagBits),
-                                           alu.io.out(xLen - 1 , xLen - MTEConfig.tagBits))),
-          alu.io.out( xLen - MTEConfig.tagBits - 1, 0)
-        )
+        val ptr_tag = ex_rs(0)(xLen - 1 , xLen - MTEConfig.tagBits)
+        val alu_tag = alu.io.out(xLen - 1 , xLen - MTEConfig.tagBits)
+        val tag = Wire(UInt(4.W))
+        when (ex_ctrl.alu_fn === ALUFN().FN_IRT) {
+          tag := lfsrs(dprv)(MTEConfig.tagBits - 1, 0)
+        } .elsewhen (ex_ctrl.alu_fn === ALUFN().FN_ADDTI) {
+          val tag_advance = raw_imm(MTEConfig.tagBits - 1, 0)
+          val tag0 = ptr_tag + tag_advance
+          val tag1 = ptr_tag + tag_advance + 1.U(4.W)
+          /* Step over the permissive tag */
+          tag := Mux(tag0 =/= custom_csrs.mtePermissiveTag, tag0, tag1)
+        } .elsewhen (ex_ctrl.sel_alu1 === A1_PTR) {
+          /* Rs1 is a pointer, so preserve its tag */
+          tag := ptr_tag
+        } .otherwise {
+          /* This is not a tag aware operation, preserve original behavior */
+          tag := alu_tag
+        }
+
+        Cat(tag, alu.io.out(xLen - MTEConfig.tagBits - 1, 0))
       } else {
         alu.io.out
       }
@@ -932,7 +955,6 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   io.ptw.ptbr := csr.io.ptbr
   io.ptw.hgatp := csr.io.hgatp
   io.ptw.vsatp := csr.io.vsatp
-  val custom_csrs = Wire(new RocketCustomCSRs)
   (custom_csrs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs <> rhs }
   // (io.ptw.customCSRs.csrs zip custom_csrs.csrs).map {case (lhs, rhs) => lhs <> rhs}
 
