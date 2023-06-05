@@ -105,8 +105,8 @@ class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocket
       1 << 3 | // disableSpeculativeICacheRefill
       haveDCache.toInt << 9 | // suppressCorruptOnGrantData
       tileParams.icache.get.prefetch.toInt << 17 |
-      0 << 18 | /* disableICache */
-      0 << 19   /* disableDCache */
+      1 << 18 | /* disableICache */
+      1 << 19   /* disableDCache */
     )
     Some(CustomCSR(chickenCSRId, mask, Some(mask)))
   }
