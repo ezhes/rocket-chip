@@ -441,7 +441,14 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val id_fence_pred = id_inst(0)(27,24)
   val id_fence_succ = id_inst(0)(23,20)
   val id_fence_next = id_ctrl.fence || id_ctrl.amo && id_amo_aq
-  val id_mem_busy = !io.dmem.ordered || io.dmem.req.valid
+  val id_mte_busy = {
+    if (usingMTE) {
+      !io.mte.get.ordered
+    } else {
+      false.B
+    }
+  }
+  val id_mem_busy = !io.dmem.ordered || io.dmem.req.valid || id_mte_busy
   when (!id_mem_busy) { id_reg_fence := false.B }
   val id_rocc_busy = usingRoCC.B &&
     (io.rocc.busy || ex_reg_valid && ex_ctrl.rocc ||
@@ -762,8 +769,8 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
           val tag_advance = raw_imm(MTEConfig.tagBits - 1, 0)
           val tag0 = ptr_tag + tag_advance
           val tag1 = ptr_tag + tag_advance + 1.U(4.W)
-          /* Step over the permissive tag */
-          tag := Mux(tag0 =/= custom_csrs.mtePermissiveTag, tag0, tag1)
+          /* Step over the permissive tag if we are not stti */
+          tag := Mux(tag0 =/= custom_csrs.mtePermissiveTag || (ex_ctrl.mem && ex_ctrl.mem_cmd === M_STTI), tag0, tag1)
         } .elsewhen (ex_ctrl.sel_alu1 === A1_PTR) {
           /* Rs1 is a pointer, so preserve its tag */
           tag := ptr_tag
@@ -1295,9 +1302,9 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
       faCSR.wport_wdata := DontCare  
     }
 
-    val s2_size = RegNext(RegNext(io.dmem.req.bits.size))
-    val s2_cmd = RegNext(RegNext(io.dmem.req.bits.cmd))
-    val s2_vaddr = RegNext(RegNext(ex_rs(0)))
+    // val s2_vaddr = RegNext(RegNext(ex_rs(0)))
+    // val s2_tag_arg = RegNext(RegNext(mte_alu(MTEConfig.tagBits - 1, 0)))
+    val s2_tag = RegNext(RegNext(ex_rs(0)(xLen - 1, xLen - MTEConfig.tagBits)))
 
     when (wb_reg_valid && wb_ctrl.mem) {
       /* Trigger a replay and kill */
@@ -1306,17 +1313,20 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
         printf("[core] Tag queue full, replaying pc=%x from wb...\n", wb_reg_pc);
       }
 
-      when (!io.dmem.s2_nack) {
-        /* We have a memory instruction in WB and it completed */
+      when (wb_ctrl.mem_cmd === M_STTI || !io.dmem.s2_nack) {
+        /* We have a tag fetch operation or tag write operation  in WB and it completed */
         val s2_paddr = io.dmem.s2_paddr
-        val s2_tag = s2_vaddr(xLen - 1, xLen - MTEConfig.tagBits)
+        // val s2_tag = s2_vaddr(xLen - 1, xLen - MTEConfig.tagBits)
         val reqB = mteIO.req.bits
         mteIO.req.valid := true.B
-        reqB.op_type := Mux(isRead(s2_cmd), MTEOperationType.LOAD, MTEOperationType.STORE)
-        reqB.mem_size := s2_size
-        reqB.address_tag := s2_tag
+        reqB.op_type := Mux(wb_ctrl.mem_cmd === M_STTI, MTEOperationType.TAG_WRITE,
+                        Mux(wb_ctrl.mem_cmd === M_XRD,  MTEOperationType.LOAD, 
+                                                        MTEOperationType.STORE))
+        reqB.mem_size := wb_reg_mem_size
+        reqB.address_tag := Mux(wb_ctrl.mem_cmd === M_STTI, wb_reg_wdata(xLen - 1, xLen - MTEConfig.tagBits),
+                                                            s2_tag)
         reqB.paddr := io.dmem.s2_paddr
-        printf("[core] s2_paddr = %x, size=%d, cmd=%x, tag = %x\n", io.dmem.s2_paddr, s2_size, s2_cmd, s2_tag)
+        // printf("[core] s2_paddr = %x, size=%d, cmd=%x, tag = %x\n", io.dmem.s2_paddr, wb_reg_mem_size, wb_ctrl.mem_cmd, s2_tag)
       }
     }
   }

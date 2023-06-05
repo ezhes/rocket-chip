@@ -252,7 +252,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
   when (!metaArb.io.in(7).ready) { io.cpu.req.ready := false.B }
 
   // address translation
-  val s1_cmd_uses_tlb = s1_readwrite || s1_flush_line || s1_req.cmd === M_WOK
+  val s1_cmd_uses_tlb = s1_readwrite || s1_flush_line || s1_req.cmd === M_WOK || s1_req.cmd === M_STTI
   io.ptw <> tlb.io.ptw
   tlb.io.kill := io.cpu.s2_kill || s2_tlb_req_valid && tlb_port.s2_kill
   tlb.io.req.valid := s1_tlb_req_valid || s1_valid && !io.cpu.s1_kill && s1_cmd_uses_tlb
@@ -432,7 +432,7 @@ class DCacheModule(outer: DCache) extends HellaCacheModule(outer) {
   val s2_dont_nack_misc = s2_valid_masked && !s2_meta_error &&
     (supports_flush.B && s2_cmd_flush_all && flushed && !flushing ||
      supports_flush.B && s2_cmd_flush_line && !s2_hit ||
-     s2_req.cmd === M_WOK)
+     s2_req.cmd === M_WOK || s2_req.cmd === M_STTI)
   io.cpu.s2_nack := s2_valid_no_xcpt && !s2_dont_nack_uncached && !s2_dont_nack_misc && !s2_valid_hit
   when (io.cpu.s2_nack || (s2_valid_hit_pre_data_ecc_and_waw && s2_update_meta)) { s1_nack := true.B }
 

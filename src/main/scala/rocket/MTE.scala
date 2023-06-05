@@ -121,6 +121,7 @@ class MTEManagerCPUIO(implicit p: Parameters)
   val mteRegionMasks = Input(Vec(rocketParams.mteRegions.size, UInt(width = coreMaxAddrBits.W)))
   val mtePermissiveTag = Input(UInt(MTEConfig.tagBits.W))
   val mteEnabled = Input(Bool())
+  val ordered = Output(Bool())
 }
 
 class MTEManagerIO(implicit p: Parameters) 
@@ -138,10 +139,12 @@ since tag enforcement is entirely async.
 object MTEManagerState extends ChiselEnum {
     /** Ready to accept a new request */
     val READY = Value
-    /** Waiting for downstream memory be ready to accept a request */
     val LINE_READ = Value
     val LINE_WAIT1 = Value
     val LINE_WAIT2 = Value
+    val WRITEBACK = Value
+    val WRITE_WAIT1 = Value
+    val WRITE_WAIT2 = Value
 }
 
 class MTEManager(implicit p: Parameters) 
@@ -150,6 +153,8 @@ class MTEManager(implicit p: Parameters)
   dontTouch(io)
 
   val fetchQueueDeq = Queue(io.cpu.req, rocketParams.mteTagFetchQueueDepth, flow = true)
+  io.cpu.ordered := !fetchQueueDeq.valid
+
   val next_state = Wire(MTEManagerState())
   next_state := DontCare
   val state = RegInit(MTEManagerState.READY)
@@ -175,37 +180,47 @@ class MTEManager(implicit p: Parameters)
     */
     op_will_be_valid := fetchQueueDeq.valid && tspa.valid && io.cpu.mteEnabled
     when (fetchQueueDeq.valid && !tspa.valid) {
-      printf("[mte] rejecting paddr=%x, tspa invalid\n", fetchQueueDeq.bits.paddr)
+      // printf("[mte] rejecting paddr=%x, tspa invalid\n", fetchQueueDeq.bits.paddr)
     }
   }
   fetchQueueDeq.ready := state === MTEManagerState.READY
   dontTouch(op_will_be_valid)
   dontTouch(next_state)
 
+  val mem_tags = Wire(Vec(8 / MTEConfig.tagBits, UInt(MTEConfig.tagBits.W)))
+  mem_tags := io.mem.resp.bits.data.asTypeOf(mem_tags)
+  val mem_tag = mem_tags(op_tspa.subByteTagSelect)
+
+  val mem_tag_write_data = RegEnable({
+    val mem_tags2 = Wire(Vec(8 / MTEConfig.tagBits, UInt(MTEConfig.tagBits.W)))
+    mem_tags2 := mem_tags
+    mem_tags2(op_tspa.subByteTagSelect) := op.address_tag
+    mem_tags2
+  }, state === MTEManagerState.LINE_WAIT2)
+
   io.mem.req.valid := state === MTEManagerState.LINE_READ ||
-    state === MTEManagerState.LINE_WAIT2 && io.mem.s2_nack
+    state === MTEManagerState.LINE_WAIT2 && io.mem.s2_nack ||
+    state === MTEManagerState.WRITEBACK || 
+    state === MTEManagerState.WRITE_WAIT2 && io.mem.s2_nack
   io.mem.s1_kill := false.B
   io.mem.s2_kill := false.B
-  io.mem.s1_data.data := DontCare
-  io.mem.s1_data.mask := Fill(coreDataBytes, 0.U(1.W))
+  io.mem.s1_data.data := Fill(coreDataBytes, mem_tag_write_data.asUInt)
+  io.mem.s1_data.mask := Fill(coreDataBytes, 1.U(1.W)) /* we're writing a byte, so only write the lob */
   val mem_reqb = io.mem.req.bits
   mem_reqb.phys := true.B
   mem_reqb.size := 0.U
   mem_reqb.signed := false.B
   mem_reqb.dv := false.B
   mem_reqb.dprv := PRV.M.U
-  mem_reqb.cmd := M_XRD
+  mem_reqb.no_xcpt := true.B
+  mem_reqb.cmd := Mux(state === MTEManagerState.WRITEBACK || state === MTEManagerState.WRITE_WAIT2, M_XWR, M_XRD)
   // val align_mask = (coreDataBytes - 1).U(coreMaxAddrBits.W)
   // val masked_addr = op_tspa.address & ~align_mask
   // mem_reqb.addr := masked_addr
   mem_reqb.addr := op_tspa.address
   when (state === MTEManagerState.LINE_READ) {
-    printf("[mte] fire! paddr=%x, tspa=%x\n",  op.paddr, op_tspa.address)
+    // printf("[mte] fire! paddr=%x, tspa=%x\n",  op.paddr, op_tspa.address)
   }
-
-  val mem_tags = Wire(Vec(8 / MTEConfig.tagBits, UInt(MTEConfig.tagBits.W)))
-  mem_tags := io.mem.resp.bits.data.asTypeOf(mem_tags)
-  val mem_tag = mem_tags(op_tspa.subByteTagSelect)
 
   /* We always update the fault record */
   val faultb = io.cpu.fault.bits
@@ -225,7 +240,7 @@ class MTEManager(implicit p: Parameters)
       faultb.physical_tag := mem_tag
       faultb.address_tag := op.address_tag
     }
-    printf("[mte] read paddr=%x, tspa=%x, data=%x\n",  op.paddr, op_tspa.address, io.mem.resp.bits.data)
+    // printf("[mte] read paddr=%x, tspa=%x, data=%x\n",  op.paddr, op_tspa.address, io.mem.resp.bits.data)
   }
 
   switch (state) {
@@ -261,9 +276,46 @@ class MTEManager(implicit p: Parameters)
           /* We couldn't fire, go to retry wait */
           next_state := MTEManagerState.LINE_READ
         }
+      } .elsewhen(op.op_type === MTEOperationType.TAG_WRITE) {
+        assert(io.mem.resp.valid)
+        /* Data is back but we need to relay the write back */
+        next_state := MTEManagerState.WRITEBACK
       } .otherwise {
-        /* Data came back, we're done! */
+        assert(io.mem.resp.valid)
+        /* Data came back and we're not a write so we're done! */
         next_state := MTEManagerState.READY
+      }
+    }
+
+    is (MTEManagerState.WRITEBACK) {
+      when (io.mem.req.fire) {
+        /* Fired! Now we enter a wait to make sure it actually arrives */
+        next_state := MTEManagerState.WRITE_WAIT1
+      } .otherwise {
+        /* Wait... */
+        next_state := MTEManagerState.WRITEBACK
+      }
+    }
+
+    is (MTEManagerState.WRITE_WAIT1) {
+      next_state := MTEManagerState.WRITE_WAIT2
+    }
+
+    is (MTEManagerState.WRITE_WAIT2) {
+      when (io.mem.s2_nack) {
+        /* Failed, we're retry */
+        when (io.mem.req.fire) {
+          /* Tag request fired, now we need to wait for it to come back */
+          next_state := MTEManagerState.WRITE_WAIT1
+        } .otherwise {
+          /* We couldn't fire, go to retry wait */
+          next_state := MTEManagerState.WRITEBACK
+        }
+      } .otherwise {
+        assert(io.mem.resp.valid)
+        /* We did it! */
+        next_state := MTEManagerState.READY
+        printf("[mte] write complete paddr=%x, tspa=%x, data=%x\n",  op.paddr, op_tspa.address, io.mem.s1_data.data)
       }
     }
   }
