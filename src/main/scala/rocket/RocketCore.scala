@@ -32,7 +32,9 @@ case class RocketCoreParams(
   nLocalInterrupts: Int = 0,
   useNMI: Boolean = false,
   useMTE: Boolean = false,
-  mteRegions:List[MTERegion] = List(),
+  mteRegions: List[MTERegion] = List(),
+  mteTagFetchQueueDepth: Int = 4,
+  mteTagFetchCacheWays: Int = 2,
   nBreakpoints: Int = 1,
   useBPWatch: Boolean = false,
   mcontextWidth: Int = 0,
@@ -301,6 +303,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     coreParams.haveCFlush.option(new CFlushDecode(tile.dcache.canSupportCFlushLine, aluFn)) ++:
     Seq(new IDecode(aluFn))
   } flatMap(_.table)
+
   val custom_csrs = Wire(new RocketCustomCSRs)
 
   val ex_ctrl = Reg(new IntCtrlSigs(aluFn))
@@ -873,10 +876,11 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   ) else Nil)
   coverExceptions(wb_xcpt, wb_cause, "WRITEBACK", wbCoverCauses)
 
+  val wb_mte_hazard = Wire(Bool())
   val wb_pc_valid = wb_reg_valid || wb_reg_replay || wb_reg_xcpt
   val wb_wxd = wb_reg_valid && wb_ctrl.wxd
   val wb_set_sboard = wb_ctrl.div || wb_dcache_miss || wb_ctrl.rocc
-  val replay_wb_common = io.dmem.s2_nack || wb_reg_replay
+  val replay_wb_common = io.dmem.s2_nack || wb_reg_replay || wb_mte_hazard
   val replay_wb_rocc = wb_reg_valid && wb_ctrl.rocc && !io.rocc.cmd.ready
   val replay_wb = replay_wb_common || replay_wb_rocc
   take_pc_wb := replay_wb || wb_xcpt || csr.io.eret || wb_reg_flush_pipe
@@ -1121,7 +1125,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   io.dmem.req.bits.dv := ex_reg_hls || csr.io.status.dv
   io.dmem.s1_data.data := (if (fLen == 0) mem_reg_rs2 else Mux(mem_ctrl.fp, Fill((xLen max fLen) / fLen, io.fpu.store_data), mem_reg_rs2))
   io.dmem.s1_kill := killm_common || mem_ldst_xcpt || fpu_kill_mem
-  io.dmem.s2_kill := false.B
+  io.dmem.s2_kill := wb_mte_hazard
   // don't let D$ go to sleep if we're probably going to use it soon
   io.dmem.keep_clock_enabled := ibuf.io.inst(0).valid && id_ctrl.mem && !csr.io.csr_stall
 
@@ -1245,15 +1249,76 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
 
 
   /* Memory Tagging Extension */
+  wb_mte_hazard := false.B
   if (usingMTE) {
+    val dprv = csr.io.status.dprv
     val faCSR = custom_csrs.getWritableOpt(custom_csrs.smte_faCSR).get
     val fstatusCSR = custom_csrs.getWritableOpt(custom_csrs.smte_fstatusCSR).get
 
-    faCSR.wport_wen := false.B
-    faCSR.wport_wdata := DontCare
+    val mteIO = io.mte.get
+    mteIO.mteRegionBases := VecInit(custom_csrs.smte_tagbases)
+    mteIO.mteRegionMasks := VecInit(custom_csrs.smte_tagmasks)
+    mteIO.mtePermissiveTag := custom_csrs.mtePermissiveTag
+    mteIO.mteEnabled := custom_csrs.mteEnabled(dprv)
+    mteIO.req := DontCare
+    mteIO.req.valid := false.B
 
-    fstatusCSR.wport_wen := false.B
-    fstatusCSR.wport_wdata := DontCare
+    when (mteIO.fault.valid &&
+          /* latch only the first fault */
+          !custom_csrs.mteFStatusValid) {
+      val fault = mteIO.fault.bits
+      printf("[core] mte fault addr=%x, load=%d, store=%d, phys_t=%x, addr_t=%x\n", 
+        fault.faulting_address,
+        fault.op_type === MTEOperationType.LOAD, fault.op_type === MTEOperationType.STORE,
+        fault.physical_tag, fault.address_tag
+      )
+      /* New fault! Log it. */
+      fstatusCSR.wport_wen := true.B
+      val fstatus = Wire(UInt(xLen.W))
+      fstatus := Cat(
+        fault.mem_size,
+        fault.op_type === MTEOperationType.LOAD,
+        dprv,
+        fault.physical_tag,
+        fault.address_tag,
+        /* valid */ 1.U(1.W),
+      )
+      fstatusCSR.wport_wdata := fstatus
+      faCSR.wport_wen := true.B
+
+      faCSR.wport_wen := true.B
+      faCSR.wport_wdata := fault.faulting_address  
+    } .otherwise {
+      fstatusCSR.wport_wen := false.B
+      fstatusCSR.wport_wdata := DontCare  
+      faCSR.wport_wen := false.B
+      faCSR.wport_wdata := DontCare  
+    }
+
+    val s2_size = RegNext(RegNext(io.dmem.req.bits.size))
+    val s2_cmd = RegNext(RegNext(io.dmem.req.bits.cmd))
+    val s2_vaddr = RegNext(RegNext(ex_rs(0)))
+
+    when (wb_reg_valid && wb_ctrl.mem) {
+      /* Trigger a replay and kill */
+      wb_mte_hazard := !mteIO.req.ready
+      when (!mteIO.req.ready) {
+        printf("[core] Tag queue full, replaying pc=%x from wb...\n", wb_reg_pc);
+      }
+
+      when (!io.dmem.s2_nack) {
+        /* We have a memory instruction in WB and it completed */
+        val s2_paddr = io.dmem.s2_paddr
+        val s2_tag = s2_vaddr(xLen - 1, xLen - MTEConfig.tagBits)
+        val reqB = mteIO.req.bits
+        mteIO.req.valid := true.B
+        reqB.op_type := Mux(isRead(s2_cmd), MTEOperationType.LOAD, MTEOperationType.STORE)
+        reqB.mem_size := s2_size
+        reqB.address_tag := s2_tag
+        reqB.paddr := io.dmem.s2_paddr
+        printf("[core] s2_paddr = %x, size=%d, cmd=%x, tag = %x\n", io.dmem.s2_paddr, s2_size, s2_cmd, s2_tag)
+      }
+    }
   }
 
   } // leaving gated-clock domain
@@ -1275,8 +1340,14 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     // efficient means to compress 64-bit VA into vaddrBits+1 bits
     // (VA is bad if VA(vaddrBits) != VA(vaddrBits-1))
     val b = vaddrBitsExtended-1
-    val a = (a0 >> b).asSInt
-    val msb = Mux(a === 0.S || a === -1.S, ea(b), !ea(b-1))
+    val msb = if (usingMTE) {
+      /* When using MTE, we ignore all upper bits for EA generation */
+      a0(b)
+    } else {
+      val a = (a0 >> b).asSInt
+      Mux(a === 0.S || a === -1.S, ea(b), !ea(b-1))
+    }
+
     Cat(msb, ea(b-1, 0))
   }
 

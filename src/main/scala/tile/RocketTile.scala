@@ -79,7 +79,7 @@ class RocketTile private(
   masterNode :=* tlOtherMastersNode
   DisableMonitors { implicit p => tlSlaveXbar.node :*= slaveNode }
 
-  nDCachePorts += 1 /*core */ + (dtim_adapter.isDefined).toInt
+  nDCachePorts += 1 /*core */ + (dtim_adapter.isDefined).toInt + tileParams.core.asInstanceOf[RocketCoreParams].useMTE.toInt
 
   val dtimProperty = dtim_adapter.map(d => Map(
     "sifive,dtim" -> d.device.asProperty)).getOrElse(Nil)
@@ -174,6 +174,12 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
 
   // Rocket has higher priority to DTIM than other TileLink clients
   outer.dtim_adapter.foreach { lm => dcachePorts += lm.module.io.dmem }
+
+  if (outer.rocketParams.core.useMTE) {
+    val mteManager = Module(new MTEManager()(p))
+    dcachePorts += mteManager.io.mem
+    core.io.mte.get <> mteManager.io.cpu
+  }
 
   // TODO eliminate this redundancy
   val h = dcachePorts.size

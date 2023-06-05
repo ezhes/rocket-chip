@@ -163,5 +163,6 @@ trait HasCoreIO extends HasTileParameters {
     val cease = Bool().asOutput
     val wfi = Bool().asOutput
     val traceStall = Bool().asInput
+    val mte = tileParams.core.asInstanceOf[RocketCoreParams].useMTE.option(new MTEManagerCPUIO()(p).flip)
   }
 }
